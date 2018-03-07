@@ -1,0 +1,6 @@
+/.idea/
+/build/
+/libs/
+/install/
+/bin/
+*.swp
