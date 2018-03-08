@@ -5,8 +5,28 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <iostream>
+#include <pthread.h>
 
 #include "net.h"
+
+#include <sys/time.h>
+
+static struct timeval tv_begin;
+static struct timeval tv_end;
+static double elasped;
+
+static void bench_start()
+{
+    gettimeofday(&tv_begin, NULL);
+}
+
+static void bench_end(const char* comment)
+{
+    gettimeofday(&tv_end, NULL);
+    elasped = ((tv_end.tv_sec - tv_begin.tv_sec) * 1000000.0f + tv_end.tv_usec - tv_begin.tv_usec) / 1000.0f;
+     fprintf(stderr, "%.2fms   %s\n", elasped, comment);
+    //__android_log_print(ANDROID_LOG_DEBUG, "SqueezeNcnn", "%.2fms   %s", elasped, comment);
+}
 
 struct Object{
     cv::Rect rec;
@@ -20,6 +40,8 @@ const char* class_names[] = {"background",
                             "cow", "diningtable", "dog", "horse",
                             "motorbike", "person", "pottedplant",
                             "sheep", "sofa", "train", "tvmonitor"};
+
+std::vector<Object> objects;
 
 static int detect_mobilenet(cv::Mat& raw_img, float show_threshold)
 {
@@ -45,7 +67,7 @@ static int detect_mobilenet(cv::Mat& raw_img, float show_threshold)
 
 
     printf("w:%d, h:%d, c:%d\n", out.w, out.h, out.c);
-    std::vector<Object> objects;
+    objects.clear();
     for (int iw=0;iw<out.h;iw++)
     {
         Object object;
@@ -56,9 +78,12 @@ static int detect_mobilenet(cv::Mat& raw_img, float show_threshold)
         object.rec.y = values[3] * img_h;
         object.rec.width = values[4] * img_w - object.rec.x;
         object.rec.height = values[5] * img_h - object.rec.y;
-        objects.push_back(object);
+        if (object.class_id == 15)
+        {
+            objects.push_back(object);
+        }
     }
-
+/*
     for(int i = 0;i<objects.size();++i)
     {
         Object object = objects.at(i);
@@ -78,8 +103,83 @@ static int detect_mobilenet(cv::Mat& raw_img, float show_threshold)
         }
     }
     cv::imshow("result",raw_img);
-
+*/
     return 0;
+}
+
+cv::Mat frame;
+int quit = 0;
+
+pthread_cond_t cond;
+pthread_mutex_t mutex;
+pthread_rwlock_t ssdLock;
+
+pthread_cond_t ssdcond;
+pthread_mutex_t ssdmutex;
+
+void * imgShowThread(void * arg)
+{
+    cv::VideoCapture * capture = (cv::VideoCapture *)arg;
+
+    (*capture) >> frame;
+    fprintf(stderr, "width[%d], height[%d].\n", frame.cols, frame.rows);
+
+    while (1)
+    {
+        pthread_mutex_lock(&mutex);
+        (*capture) >> frame;
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
+
+        for(int i = 0;i<objects.size();++i)
+        {
+            Object object = objects.at(i);
+
+            cv::rectangle(frame, object.rec, cv::Scalar(255, 0, 255));
+            std::ostringstream pro_str;
+            pro_str<<object.prob;
+            std::string label = std::string(class_names[object.class_id]) + ": " + pro_str.str();
+            int baseLine = 0;
+            cv::Size label_size = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
+            cv::rectangle(frame, cv::Rect(cv::Point(object.rec.x, object.rec.y- label_size.height),
+                                  cv::Size(label_size.width, label_size.height + baseLine)),
+                      cv::Scalar(214, 112, 218), CV_FILLED);
+            cv::putText(frame, label, cv::Point(object.rec.x, object.rec.y),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0));
+        }
+        cv::imshow("ulsee",frame);
+
+        int c = cv::waitKey(5);
+        if( c == 27 || c == 'q' || c == 'Q' )
+        {
+            quit = 1;
+            break;
+        }
+    }
+    std::cout << " imgshow thread quit" << std::endl;
+    return NULL;
+}
+
+void * ssdThread(void * arg)
+{
+    while (!quit)
+    {
+        pthread_mutex_lock(&mutex);
+        pthread_cond_wait(&cond,&mutex);
+
+        pthread_mutex_unlock(&mutex);
+        pthread_rwlock_wrlock(&ssdLock);
+
+        bench_start();
+        detect_mobilenet(frame,0.5);
+        bench_end("ssd");
+        pthread_rwlock_unlock(&ssdLock);
+
+    }
+
+    pthread_cond_broadcast(&ssdcond);
+
+    return NULL;
 }
 
 int main(int argc, char** argv)
@@ -96,24 +196,27 @@ int main(int argc, char** argv)
         detect_mobilenet(m,0.5);
         cv::waitKey(0);
     } else {
-        cv::VideoCapture capture(1);
-        if (!capture.isOpened()) {
-            fprintf(stderr, "fail to open camera(1)!\n");
+        cv::VideoCapture capture;
+        if ( !capture.open(1))
+        {
+            printf("open video device /dev/video%d fail\n", 1);
             return -1;
         }
-        cv::Mat frame;
-        if (capture.isOpened()) {
-            while (true) {
-                capture >> frame;
-                fprintf(stderr, "width[%d], height[%d].\n", frame.cols, frame.rows);
-                //  capture.read(frame);
-                if( !frame.empty() ) {
-                    detect_mobilenet(frame,0.5);
-                    cv::waitKey(5);
-                } else {
-                    return -1;
-                }
-            }
+        if( capture.isOpened() )
+        {
+            pthread_t  imgTid, ssdTid;
+            void * ssdThreadRe;
+
+            pthread_cond_init(&cond, NULL);
+            pthread_mutex_init(&mutex, NULL);
+
+            pthread_cond_init(&ssdcond, NULL);
+            pthread_mutex_init(&ssdmutex, NULL);
+
+            pthread_create(&imgTid, NULL, imgShowThread, (void *)(&capture));
+            pthread_create(&ssdTid, NULL, ssdThread, NULL);
+
+            pthread_join(ssdTid, &ssdThreadRe);
         }
     }
 
