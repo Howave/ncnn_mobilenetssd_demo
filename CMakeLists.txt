@@ -11,5 +11,6 @@ set(CMAKE_LDFLAGS "${CMAKE_LDFLAGS} -fopenmp")
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ncnn/include)
 link_directories(${CMAKE_CURRENT_SOURCE_DIR}/ncnn/lib)
 
+set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/)
 add_executable(ssdmobilenet ssdmobilenet.cpp)
 target_link_libraries(ssdmobilenet ncnn ${OpenCV_LIBS})
