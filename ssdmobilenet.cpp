@@ -207,7 +207,7 @@ int main(int argc, char** argv)
         cv::waitKey(0);
     } else {
         cv::VideoCapture capture;
-        if ( !capture.open(1))
+        if ( !capture.open(0))
         {
             printf("open video device /dev/video%d fail\n", 1);
             return -1;
